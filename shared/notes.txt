@@ -1,0 +1,32 @@
+az functionapp create -g rg-smartloans-workers -n smartloans-workers-func --storage-account workercontainer --consumption-plan-location eastus --os-type Windows --runtime python --runtime-version 3.11 --functions-version 
+
+
+az functionapp create -g rg-smartloans-workers -n smartloans-workers-func --storage-account workercontainer --consumption-plan-location eastus --os-type Linux --runtime python --runtime-version 3.11 --functions-version 4
+
+
+az functionapp config appsettings set -g rg-smartloans-workers -n smartloans-workers-func --settings FUNCTIONS_WORKER_RUNTIME=python AzureWebJobsStorage="DefaultEndpointsProtocol=https;AccountName=workercontainer;AccountKey=***;EndpointSuffix=core.windows.net" AZURE_SQL_CONNECTION_STRING="Driver={ODBC Driver 18 for SQL Server};Server=sql.bsite.net\\MSSQL2016;Database=montanogilberto_smartloans;Uid=montanogilberto_smartloans;Pwd=***;Encrypt=yes;TrustServerCertificate=yes;Connection Timeout=30;" ML_SITE_ID=MLM ML_MARKET=MX ML_KEYWORDS=iphone,ps5,airpods ML_CATEGORIES="" ML_SELLER_IDS="" ML_LIMIT=50 ML_MAX_PAGES=10 ML_TIMEOUT_SECONDS=25 ML_CALL_ITEMS_DETAIL=1
+
+
+az functionapp config appsettings list -g rg-smartloans-workers -n smartloans-workers-func -o table
+
+
+https://auth.mercadolibre.com.mx/authorization?response_type=code&client_id=4763056577640918&redirect_uri=http://localhost:8080/callback
+
+https://auth.mercadolibre.com.mx/authorization
+?response_type=code
+&client_id=4763056577640918
+&redirect_uri=https://smartloansbackend.azurewebsites.net/mercadolibre/oauth/callback
+&code_challenge=QZ7A4ynD3FesYUfZNIoTANnZP74mPYm6SumSK4Ecf_Q
+&code_challenge_method=S256
+
+https://auth.mercadolibre.com.mx/authorization?response_type=code&client_id=4763056577640918&redirect_uri=https%3A%2F%2Fsmartloansbackend.azurewebsites.net%2Fmercadolibre%2Foauth%2Fcallback&code_challenge=9Yxri_NLfFPpC3IORkPb542JPXcmnNIHZ3qAp31YDrA&code_challenge_method=S256
+
+
+
+
+
+
+
+
+
+

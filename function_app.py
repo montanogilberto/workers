@@ -54,6 +54,8 @@ def publish_jobs_timer(mytimer: func.TimerRequest) -> None:
     run_on_startup=True,
     use_monitor=False
 )
+
+##
 def ml_competitor_timer(mytimer: func.TimerRequest) -> None:
     """
     Timer trigger for MercadoLibre competitor listings extraction.
@@ -73,13 +75,13 @@ def ml_competitor_timer(mytimer: func.TimerRequest) -> None:
     logging.info("ml_competitor_timer fired")
     run_ml_sell_listings_worker(mytimer)
 
-
 @app.timer_trigger(
     schedule="0 */15 * * * *",  # Every 15 minutes at :00, :15, :30, :45
     arg_name="mytimer",
     run_on_startup=True,
     use_monitor=False
 )
+
 def amazon_listings_timer(mytimer: func.TimerRequest) -> None:
     """
     Timer trigger for Amazon listings extraction.
@@ -96,13 +98,13 @@ def amazon_listings_timer(mytimer: func.TimerRequest) -> None:
     logging.info("amazon_listings_timer fired")
     run_amazon_listings_worker(mytimer)
 
-
 @app.timer_trigger(
     schedule="0 5 16 * * *",  # Daily at 16:05 UTC = 09:05 Hermosillo (UTC-7)
     arg_name="mytimer",
     run_on_startup=True,
     use_monitor=False
 )
+
 def exchange_rates_timer(mytimer: func.TimerRequest) -> None:
     """
     Timer trigger for exchange rates fetch.

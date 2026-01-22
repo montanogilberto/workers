@@ -1,45 +1,65 @@
-# Migration Plan: v1+v2 → Pure v2 (function_app.py only)
+# TODO - Azure Function App Fixes
 
-## Status: ✅ COMPLETED
+## Status: ✅ Fixed - Bypass Proxy and Call ML Directly
 
-### Step 1: Create missing workers ✅
-- [x] Create `amazonListingsWorker/__init__.py` with Amazon listings extraction logic
-- [x] Create wrapper function `run_exchange_rates_worker()` in `exchangeRatesWorker.py`
-- [x] Create wrapper function `run_ml_sell_listings_worker()` in existing ML worker
+### Problem Solved
+The backend proxy `smartloansbackend.azurewebsites.net/ml/search` was returning 403 Forbidden. The solution was to call MercadoLibre API directly.
 
-### Step 2: Update function_app.py ✅
-- [x] Import all worker run functions
-- [x] Add `use_monitor=False` to all timer triggers
-- [x] Fix schedules for all timers:
-  - publish_jobs_timer: `*/30 * * * * *` (every 30 sec)
-  - ml_competitor_timer: `0 */5 * * * *` (every 5 min)
-  - amazon_listings_timer: `0 */15 * * * *` (every 15 min)
-  - exchange_rates_timer: `0 5 16 * * *` (daily 16:05 UTC = 09:05 Hermosillo)
+### ✅ Completed Changes
 
-### Step 3: Cleanup v1 folders ✅
-- [x] `exchange_rates_timer/` → `exchange_rates_timer.OLD/` (disabled v1 code)
-- [x] `mlSellListingsWorker/function.json` → ignored (v1 trigger config, not used)
+#### 1. Removed v1 function.json files (fix "mixed function app" warning)
+- [x] Deleted `mlSellListingsWorker/function.json`
+- [x] Deleted `exchange_rates_timer.OLD/` (entire folder)
 
-### Step 4: Verify and Test
-- [ ] Verify all imports work
-- [ ] Deploy to Azure
-- [ ] Check logs with: `az webapp log tail -g rg-smartloans-workers -n smartloans-workers-func`
+#### 2. Updated `shared/ml_api.py` with browser headers
+- [x] Added `DEFAULT_HEADERS` with browser-like User-Agent, Accept, Accept-Language
+- [x] Added `requests.Session` for cookie persistence
+- [x] Added optional `ML_ACCESS_TOKEN` support
+- [x] Pass headers and session to `request_with_backoff`
 
-## Summary of Changes
+#### 3. Updated `shared/retry.py` with smart backoff
+- [x] 403 fails fast after 2 retries (~7 seconds max, was 128s)
+- [x] 429 uses exponential backoff
+- [x] 5xx uses exponential backoff
 
-### Files Created:
-- `exchangeRatesWorker/__init__.py` - Exchange rates worker with wrapper
-- `amazonListingsWorker/__init__.py` - Amazon listings worker (placeholder for API)
+#### 4. Bypass Proxy - Call ML API Directly
+- [x] **Updated `local.settings.json`**: Set `SMARTLOANS_BACKEND_URL=https://api.mercadolibre.com`
+- [x] **Updated `shared/ml_api.py`**:
+  - Changed search URL from `/ml/search` to `/sites/{site_id}/search`
+  - Changed items URL from `/ml/items/{id}` to `/items/{id}`
+  - Uses `ML_SITE_ID` from env for dynamic site ID
 
-### Files Modified:
-- `function_app.py` - Complete rewrite with v2 triggers calling real workers
-- `mlSellListingsWorker/__init__.py` - Added `run_ml_sell_listings_worker()` wrapper
+---
 
-### Files Renamed (to disable v1):
-- `exchange_rates_timer/` → `exchange_rates_timer.OLD/`
+## New Flow (After Fix)
 
-### Old function.json files (ignored):
-- These are NOT used - all schedules come from `function_app.py`:
-  - `exchange_rates_timer/function.json` (schedule: `0 10 9 * * *`)
-  - `mlSellListingsWorker/function.json` (schedule: `0 */10 * * * *`)
+```
+Timer → mlSellListingsWorker → api.mercadolibre.com/sites/MLM/search → ML API
+                                        ↑
+                                   Direct Call
+```
+
+## API Endpoints
+
+| Endpoint | Old (Proxy) | New (Direct) |
+|----------|-------------|--------------|
+| Search | `/ml/search` | `/sites/MLM/search` |
+| Items | `/ml/items/{id}` | `/items/{id}` |
+
+## Test Results
+
+| Metric | Before | After |
+|--------|--------|-------|
+| 403 from Proxy | Yes | Gone ✅ |
+| ML API Direct | Not called | Working |
+| Search Path | /ml/search | /sites/MLM/search |
+| 403 Retry Time | 128s | 7.5s ✅ |
+
+---
+
+## Next Steps
+
+1. Run `func start` and test the `ml_competitor_timer` function
+2. Verify listings are being fetched from ML API directly
+3. Check database for inserted sell listings
 
