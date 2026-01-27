@@ -2,78 +2,120 @@ import time
 import random
 import requests
 
-# 5xx server errors - retry with exponential backoff
 RETRIABLE_5XX = {500, 502, 503, 504}
-# Rate limiting - retry with exponential backoff
 RETRIABLE_429 = {429}
-# 403 Forbidden - likely anti-bot/WAF, fail fast (few retries)
 RETRIABLE_403 = {403}
 
-# Max retries for 403 (anti-bot) - fail fast
 MAX_RETRIES_403 = 2
-# Max retries for 429/5xx - more retries allowed
 MAX_RETRIES_OTHER = 6
 
+MAX_SLEEP_SECONDS = 60
 
-def request_with_backoff(method: str, url: str, *, headers=None, params=None, timeout=25, max_retries=6, session=None):
+
+def _sleep(seconds: float) -> None:
+    time.sleep(max(0.0, seconds))
+
+
+def _retry_after_seconds(resp: requests.Response) -> float | None:
+    """
+    If server provides Retry-After, respect it.
+    Retry-After can be seconds or HTTP date; we support seconds.
+    """
+    ra = resp.headers.get("Retry-After")
+    if not ra:
+        return None
+    try:
+        return float(ra)
+    except Exception:
+        return None
+
+
+def request_with_backoff(
+    method: str,
+    url: str,
+    *,
+    headers=None,
+    params=None,
+    json=None,
+    data=None,
+    timeout=25,
+    session=None,
+):
     """
     Smart backoff with different handling per error type:
-    - 403 (anti-bot/WAF): fail fast, few retries with jitter
-    - 429 (rate limit): exponential backoff
-    - 5xx (server errors): exponential backoff
-    
-    Args:
-        session: Optional requests.Session for cookie persistence
+    - 403: fail fast (likely WAF/anti-bot)
+    - 429: exponential backoff (honor Retry-After if present)
+    - 5xx: exponential backoff
+    Supports GET/POST/etc with params + json/data.
     """
-    attempt = 0
-    last_exc = None
     http = session if session is not None else requests
 
-    while attempt <= max_retries:
-        try:
-            resp = http.request(method, url, headers=headers, params=params, timeout=timeout)
+    attempt = 0
+    last_exc = None
 
-            # 403: anti-bot protection - fail fast
+    while True:
+        try:
+            resp = http.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                json=json,
+                data=data,
+                timeout=timeout,
+            )
+
+            # 403: fail fast with small jitter
             if resp.status_code in RETRIABLE_403:
                 if attempt >= MAX_RETRIES_403:
-                    # Raise immediately without catching
                     resp.raise_for_status()
-                sleep_s = 2 + random.uniform(0, 1)  # Short delay between retries
-                time.sleep(sleep_s)
+                _sleep(2.0 + random.uniform(0, 1))
                 attempt += 1
                 continue
 
-            # 429: rate limiting - exponential backoff
+            # 429: rate limiting
             if resp.status_code in RETRIABLE_429:
-                sleep_s = min(60, (2 ** attempt)) + random.uniform(0, 1)
-                time.sleep(sleep_s)
+                ra = _retry_after_seconds(resp)
+                if ra is not None:
+                    sleep_s = min(MAX_SLEEP_SECONDS, ra) + random.uniform(0, 1)
+                else:
+                    sleep_s = min(MAX_SLEEP_SECONDS, (2 ** attempt)) + random.uniform(0, 1)
+                if attempt >= MAX_RETRIES_OTHER:
+                    resp.raise_for_status()
+                _sleep(sleep_s)
                 attempt += 1
                 continue
 
-            # 5xx: server errors - exponential backoff
+            # 5xx: server errors
             if resp.status_code in RETRIABLE_5XX:
-                sleep_s = min(60, (2 ** attempt)) + random.uniform(0, 0.5)
-                time.sleep(sleep_s)
+                if attempt >= MAX_RETRIES_OTHER:
+                    resp.raise_for_status()
+                sleep_s = min(MAX_SLEEP_SECONDS, (2 ** attempt)) + random.uniform(0, 0.5)
+                _sleep(sleep_s)
                 attempt += 1
                 continue
 
+            # success or non-retriable error
             resp.raise_for_status()
             return resp
 
         except requests.exceptions.HTTPError as e:
-            # Only catch HTTP errors that are not 403 (already handled above)
-            # For 403 that made it here, re-raise immediately
+            # If it's 403 and it got here, re-raise immediately
             if e.response is not None and e.response.status_code in RETRIABLE_403:
-                raise e
+                raise
             last_exc = e
-            sleep_s = min(60, (2 ** attempt)) + random.uniform(0, 0.5)
-            time.sleep(sleep_s)
+            if attempt >= MAX_RETRIES_OTHER:
+                break
+            sleep_s = min(MAX_SLEEP_SECONDS, (2 ** attempt)) + random.uniform(0, 0.5)
+            _sleep(sleep_s)
             attempt += 1
 
         except Exception as e:
             last_exc = e
-            sleep_s = min(60, (2 ** attempt)) + random.uniform(0, 0.5)
-            time.sleep(sleep_s)
+            if attempt >= MAX_RETRIES_OTHER:
+                break
+            sleep_s = min(MAX_SLEEP_SECONDS, (2 ** attempt)) + random.uniform(0, 0.5)
+            _sleep(sleep_s)
             attempt += 1
 
     raise RuntimeError(f"HTTP request failed after retries. url={url}. error={last_exc}")

@@ -1,0 +1,27 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "AZURE_SQL_CONNECTION_STRING": "Driver={ODBC Driver 18 for SQL Server};Server=sql.bsite.net\\MSSQL2016;Database=montanogilberto_smartloans;Uid=montanogilberto_smartloans;Pwd=Admin#1914;Encrypt=yes;TrustServerCertificate=yes;Connection Timeout=30;",
+    "SMARTLOANS_BACKEND_URL": "https://api.mercadolibre.com",
+    "ML_SITE_ID": "MLM",
+    "ML_MARKET": "MX",
+    "ML_KEYWORDS": "iphone,ps5,airpods",
+    "ML_CATEGORIES": "",
+    "ML_SELLER_IDS": "",
+    "ML_LIMIT": "50",
+    "ML_MAX_PAGES": "10",
+    "ML_TIMEOUT_SECONDS": "25",
+    "ML_CALL_ITEMS_DETAIL": "1",
+    "ML_CODE_VERIFIER": "WygRtf4PJnu6rjKMJaPvMl3242CrDBWG_BugnQSJfms",
+    "ML_CLIENT_ID": "4763056577640918",
+    "ML_CLIENT_SECRET": "t2SVlSDpNuB8YPM7VJFbvSCv4X1azuti",
+    "ML_REDIRECT_URI": "https://smartloansbackend.azurewebsites.net/mercadolibre/oauth/callback",
+    "ML_ACCESS_TOKEN": "",
+    "ML_REFRESH_TOKEN": "",
+    "WEBSITE_RUN_FROM_PACKAGE": "1",
+    "SCM_DO_BUILD_DURING_DEPLOYMENT": "1"
+  }
+}
+

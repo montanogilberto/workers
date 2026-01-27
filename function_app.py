@@ -12,6 +12,8 @@ Schedule Notes:
 
 import azure.functions as func
 import logging
+from mlSearchWorker import run_ml_search_worker
+
 
 # Configure logging
 logging.basicConfig(
@@ -116,4 +118,20 @@ def exchange_rates_timer(mytimer: func.TimerRequest) -> None:
     """
     logging.info("exchange_rates_timer fired")
     run_exchange_rates_worker(mytimer)
+
+@app.timer_trigger(
+    schedule="*/30 * * * * *",  # Every 30 seconds
+    arg_name="mytimer",
+    run_on_startup=True,
+    use_monitor=False
+)
+def ml_search_timer(mytimer: func.TimerRequest) -> None:
+    """
+    Timer trigger for ML Search Jobs (Queue-based).
+    Schedule: Every 30 seconds
+    Worker: Dequeue search jobs from dbo.ml_jobs and process them.
+    """
+    logging.info("ml_search_timer fired")
+    run_ml_search_worker(mytimer)
+
 
