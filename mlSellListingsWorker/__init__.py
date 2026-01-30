@@ -2,8 +2,9 @@ import os
 import azure.functions as func
 import logging
 from datetime import datetime, timezone
+import json
 
-from shared.ml_api import ml_search, ml_item
+from shared.ml_api import ml_product_items, ml_item
 from shared.selllistings_mapper import map_ml_item_to_selllisting
 from shared.db import exec_sp_json
 
@@ -21,13 +22,6 @@ def chunk(lst, n: int):
 
 
 def _sp_first_row(sp_resp):
-    """
-    exec_sp_json() in your project may return:
-      - dict: {"result":[{...}]}
-      - list: [{...}]
-      - None
-    This helper returns the first row dict (or {}).
-    """
     if sp_resp is None:
         return {}
     if isinstance(sp_resp, dict):
@@ -38,83 +32,121 @@ def _sp_first_row(sp_resp):
     return {}
 
 
+def _is_blocked_payload(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("http_status") == 403:
+        return True
+    if str(data.get("error", "")).lower() in ("backend_forbidden", "forbidden", "waf_blocked"):
+        return True
+    return False
+
+
 def process_ml_listings():
     site_market = os.getenv("ML_MARKET", "MX")
     limit = int(os.getenv("ML_LIMIT", "50"))
     max_pages = int(os.getenv("ML_MAX_PAGES", "10"))
-    call_details = os.getenv("ML_CALL_ITEMS_DETAIL", "1") == "1"
 
-    keywords = parse_csv_env("ML_KEYWORDS")
-    categories = parse_csv_env("ML_CATEGORIES")
+    # IMPORTANT: default OFF because ML blocks /items/{id}
+    call_details = os.getenv("ML_CALL_ITEMS_DETAIL", "0") == "1"
+
+    product_ids = parse_csv_env("ML_PRODUCT_IDS")
     seller_ids = parse_csv_env("ML_SELLER_IDS")
 
-    if not keywords and not categories and not seller_ids:
-        logger.info("ML Worker: No inputs (ML_KEYWORDS / ML_CATEGORIES / ML_SELLER_IDS). Nothing to do.")
-        return {"success": True, "items_fetched": 0, "items_inserted": 0}
+    if not product_ids and not seller_ids:
+        logger.info("ML Worker: No inputs (ML_PRODUCT_IDS / ML_SELLER_IDS). Nothing to do.")
+        return {"success": True, "items_fetched": 0, "items_inserted": 0, "blocked_jobs": 0}
+
+    # ✅ FX required by your DB/SP
+    # TEMP: set env FX_RATE_TO_USD. Later: read from DB (exchangeRates table)
+    fx_rate_to_usd = float(os.getenv("FX_RATE_TO_USD", "0") or 0)
+    fx_as_of_date = os.getenv("FX_AS_OF_DATE") or datetime.now(timezone.utc).date().isoformat()
+
+    if fx_rate_to_usd <= 0:
+        # fail fast so you don't insert broken rows
+        raise ValueError("FX_RATE_TO_USD env var must be set > 0 (required for sellListings).")
 
     logger.info("ML Worker: Started")
     logger.info("Config => market=%s limit=%s max_pages=%s call_details=%s", site_market, limit, max_pages, call_details)
-
-    search_jobs = []
-
-    for q in keywords:
-        search_jobs.append({"q": q, "category": None, "seller_id": None})
-
-    for c in categories:
-        search_jobs.append({"q": "*", "category": c, "seller_id": None})
-
-    for sid in seller_ids:
-        search_jobs.append({"q": "*", "category": None, "seller_id": sid})
+    logger.info("Inputs => product_ids=%s seller_ids=%s", len(product_ids), len(seller_ids))
+    logger.info("FX => rate_to_usd=%s as_of=%s", fx_rate_to_usd, fx_as_of_date)
 
     inserted = 0
     total_items = 0
+    blocked = 0
 
-    for job in search_jobs:
-        q = job["q"]
-        category = job["category"]
-        seller_id = job["seller_id"]
-
-        logger.info("Search job => q=%s category=%s seller_id=%s", q, category, seller_id)
+    # -----------------------------
+    # A) PRODUCT IDS FLOW (recommended)
+    # -----------------------------
+    for pid in product_ids:
+        logger.info("Product job => product_id=%s", pid)
 
         offset = 0
         page = 0
 
         while page < max_pages:
-            data = ml_search(q, category=category, seller_id=seller_id, offset=offset, limit=limit)
-            results = data.get("results", []) or []
-            paging = data.get("paging", {}) or {}
+            data = ml_product_items(pid, offset=offset, limit=limit)
+
+            if _is_blocked_payload(data):
+                logger.error("  product_items blocked (403) product_id=%s request_id=%s", pid, data.get("request_id"))
+                blocked += 1
+                break
+
+            results = (data.get("results", []) or [])
+            paging = (data.get("paging", {}) or {})
             total = int(paging.get("total", 0) or 0)
 
             if not results:
-                logger.info("  No results at offset=%s. Stop job.", offset)
+                logger.info("  No results at offset=%s. Stop product job.", offset)
                 break
 
-            item_ids = [r.get("id") for r in results if r.get("id")]
+            item_ids = [r.get("item_id") for r in results if r.get("item_id")]
             total_items += len(item_ids)
 
-            # Detail calls
-            if call_details:
-                items_detail = []
-                for batch in chunk(item_ids, 20):
-                    for item_id in batch:
-                        try:
-                            items_detail.append(ml_item(item_id))
-                        except Exception as e:
-                            logger.error("  Item detail failed id=%s: %s", item_id, e)
-            else:
-                items_detail = results
+            # Default: use listing rows directly (no /items/{id})
+            items_detail = results
 
-            # Map to sellListings payload
+            # Optional: best-effort enrich (will not stop inserts)
+            if call_details:
+                enriched = []
+                for item_id in item_ids:
+                    detail = ml_item(item_id)
+                    if _is_blocked_payload(detail):
+                        logger.warning("  Item detail blocked (403) id=%s request_id=%s", item_id, detail.get("request_id"))
+                        fallback = next((r for r in results if r.get("item_id") == item_id), None)
+                        if fallback:
+                            fallback = dict(fallback)
+                            fallback["details_blocked"] = 1
+                            fallback["details_http_status"] = 403
+                            enriched.append(fallback)
+                        continue
+                    enriched.append(detail)
+                items_detail = enriched
+
+            # --------------------------------------------------
+            # Map to sellListings payload (SP schema)
+            # --------------------------------------------------
             sell_listings_payload = []
             for it in items_detail:
                 try:
-                    mapped = map_ml_item_to_selllisting(it, market=site_market)
+                    mapped = map_ml_item_to_selllisting(
+                        it,
+                        market=site_market,
+                        fx_rate_to_usd=fx_rate_to_usd,
+                        fx_as_of_date=fx_as_of_date,
+                    )
+
+                    # traceability (optional - SP will ignore unknown fields)
+                    mapped["details_source"] = "items" if "id" in it else "product_items"
+
                     sell_listings_payload.append({**mapped, "action": "1"})
                 except Exception as e:
                     logger.error("  Map failed: %s", e)
 
             if sell_listings_payload:
                 payload = {"sellListings": sell_listings_payload}
+                logger.info("SELLLISTINGS PAYLOAD (first item): %s", json.dumps(payload["sellListings"][0], ensure_ascii=False)[:2500])
+
                 sp_out = exec_sp_json("sp_sellListings", payload)
                 inserted += len(sell_listings_payload)
 
@@ -129,35 +161,30 @@ def process_ml_listings():
 
             offset += limit
             page += 1
-
             if total and offset >= total:
                 break
 
-    logger.info("ML Worker: Done. total_items=%s inserted_rows=%s", total_items, inserted)
-    return {"success": True, "items_fetched": total_items, "items_inserted": inserted}
+    logger.info("ML Worker: Done. total_items=%s inserted_rows=%s blocked_jobs=%s", total_items, inserted, blocked)
+    return {"success": True, "items_fetched": total_items, "items_inserted": inserted, "blocked_jobs": blocked}
 
 
 def run_ml_sell_listings_worker(mytimer: func.TimerRequest) -> None:
-    # ✅ FIX: TimerRequest has no .timestamp
     now_utc = datetime.now(timezone.utc).isoformat()
     logger.info("ML Worker: Timer fired at %s | past_due=%s", now_utc, getattr(mytimer, "past_due", False))
 
-    if mytimer.past_due:
+    if getattr(mytimer, "past_due", False):
         logger.warning("ML Worker: The timer is past due!")
 
-    try:
-        result = process_ml_listings()
-        logger.info(
-            "ML Worker: Result = success=%s items_fetched=%s items_inserted=%s",
-            result.get("success"),
-            result.get("items_fetched"),
-            result.get("items_inserted"),
-        )
-    except Exception as e:
-        logger.error("ML Worker: Failed with error: %s", str(e), exc_info=True)
-        raise
-
-
-def main():
     result = process_ml_listings()
-    print(f"ML listings worker completed: {result}")
+    logger.info(
+        "ML Worker: Result = success=%s items_fetched=%s items_inserted=%s blocked_jobs=%s",
+        result.get("success"),
+        result.get("items_fetched"),
+        result.get("items_inserted"),
+        result.get("blocked_jobs"),
+    )
+
+
+# Azure Functions entrypoint
+def main(mytimer: func.TimerRequest) -> None:
+    run_ml_sell_listings_worker(mytimer)

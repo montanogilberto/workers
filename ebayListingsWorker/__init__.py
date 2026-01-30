@@ -1,7 +1,8 @@
 """
-Amazon Listings Worker - Azure Function Wrapper
+eBay Listings Worker - Azure Function Wrapper
 
-This module provides the Azure Functions timer trigger wrapper for Amazon listings extraction.
+This module provides the Azure Functions timer trigger wrapper for eBay listings extraction.
+Implements stable timestamp approach to avoid duplicate rows in the database.
 """
 
 import os
@@ -13,10 +14,20 @@ from typing import Any, Dict, List, Optional
 
 from shared.db import exec_sp_json
 
+logger = logging.getLogger(__name__)
+
+# eBay API configuration
+EBAY_API_BASE = os.getenv("EBAY_API_BASE", "https://api.ebay.com")
+EBAY_API_KEY = os.getenv("EBAY_API_KEY")
+EBAY_SANDBOX = os.getenv("EBAY_SANDBOX", "0") == "1"
+
 
 def _stable_listing_ts(fx_as_of_date: str) -> str:
     """
     Generate a stable listing timestamp at midnight UTC from fxAsOfDate.
+    
+    This ensures the same listing processed multiple times on the same day
+    will update the same database row instead of creating duplicates.
     
     Args:
         fx_as_of_date: Date string in 'YYYY-MM-DD' format.
@@ -29,12 +40,6 @@ def _stable_listing_ts(fx_as_of_date: str) -> str:
     
     dt = datetime.fromisoformat(fx_as_of_date).replace(tzinfo=timezone.utc)
     return dt.isoformat().replace("+00:00", "Z")
-
-logger = logging.getLogger(__name__)
-
-# Amazon API configuration
-AMAZON_API_BASE = os.getenv("AMAZON_API_BASE", "https://api.amazon.com")
-AMAZON_API_KEY = os.getenv("AMAZON_API_KEY")
 
 
 def parse_csv_env(name: str, default: str = "") -> List[str]:
@@ -50,81 +55,90 @@ def chunk(lst: List[Any], n: int):
         yield lst[i:i + n]
 
 
-def fetch_amazon_listings(keyword: str, marketplace: str = "MX") -> List[Dict[str, Any]]:
+def fetch_ebay_listings(keyword: str, marketplace: str = "EBAY_MX") -> List[Dict[str, Any]]:
     """
-    Fetch listings from Amazon API for a given keyword.
+    Fetch listings from eBay API for a given keyword.
     
     Args:
         keyword: Search keyword.
-        marketplace: Amazon marketplace (MX, US, etc.).
+        marketplace: eBay marketplace code.
     
     Returns:
         List of item dictionaries.
     """
-    # Placeholder for actual Amazon API integration
+    # Placeholder for actual eBay API integration
     # Replace with real API calls when available
-    logger.info(f"Fetching Amazon listings for keyword='{keyword}' marketplace='{marketplace}'")
+    logger.info(f"Fetching eBay listings for keyword='{keyword}' marketplace='{marketplace}'")
     
-    # TODO: Implement actual Amazon API call
+    # TODO: Implement actual eBay API call
     # Example structure:
-    # url = f"{AMAZON_API_BASE}/products/search"
-    # params = {"q": keyword, "marketplace": marketplace}
-    # headers = {"Authorization": f"Bearer {AMAZON_API_KEY}"}
+    # url = f"{EBAY_API_BASE}/buy/browse/v1/item_summary/search"
+    # params = {"q": keyword, "filter": f"marketplaceIds:{marketplace}"}
+    # headers = {"Authorization": f"Bearer {EBAY_API_KEY}"}
     # response = requests.get(url, params=params, headers=headers, timeout=30)
     
     # For now, return empty list (no-op mode)
-    logger.warning("Amazon API not configured - no listings fetched")
+    logger.warning("eBay API not configured - no listings fetched")
     return []
 
 
-def map_amazon_item_to_selllisting(item: Dict[str, Any], market: str, fx_as_of_date: str = None) -> Dict[str, Any]:
+def map_ebay_item_to_selllisting(item: Dict[str, Any], market: str, fx_as_of_date: str = None) -> Dict[str, Any]:
     """
-    Map Amazon item to sellListing format.
+    Map eBay item to sellListing format with stable timestamp.
+    
+    This follows the same pattern as ML and Amazon workers to ensure
+    consistent behavior across all channels.
     
     Args:
-        item: Amazon item dictionary.
+        item: eBay item dictionary.
         market: Marketplace code.
         fx_as_of_date: Date string in 'YYYY-MM-DD' format for stable timestamp.
     
     Returns:
         Mapped sellListing dictionary.
     """
-    # Use provided fxAsOfDate or default to current date
+    # Use provided fxAsOfDate or default to current date (midnight UTC)
     fx_date = fx_as_of_date or datetime.now(timezone.utc).date().isoformat()
     
+    # Calculate USD price if conversion rate available
+    fx_rate = float(os.getenv("FX_RATE_TO_USD", "0") or 0)
+    price = float(item.get("price", 0) or 0)
+    price_usd = price * fx_rate if fx_rate > 0 else 0.0
+    
     return {
-        "channel": "amazon",
+        "channel": "ebay",
         "market": market,
-        "channelItemId": str(item.get("asin")),
+        "channelItemId": str(item.get("itemId") or item.get("id")),
         "title": item.get("title"),
-        "sellPriceOriginal": float(item.get("price", 0)),
-        "currencyOriginal": item.get("currency", "MXN"),
-        "sellPriceUsd": 0.0,  # Will be calculated if needed
-        "fxRateToUsd": None,
+        "sellPriceOriginal": price,
+        "currencyOriginal": item.get("currency") or "MXN",
+        "sellPriceUsd": price_usd,
+        "fxRateToUsd": fx_rate if fx_rate > 0 else None,
         "fxAsOfDate": fx_date,
         "fulfillmentType": item.get("fulfillment_type"),
         "shippingTimeDays": item.get("shipping_time_days"),
         "rating": item.get("rating"),
         "reviewsCount": item.get("reviews_count"),
         "listingTimestamp": _stable_listing_ts(fx_date),
-        "unifiedProductId": item.get("upc"),
+        "unifiedProductId": item.get("upc") or item.get("epid"),
         "action": "1",
     }
 
 
-def process_amazon_listings():
+def process_ebay_listings():
     """
-    Main logic: fetch Amazon listings and upsert to database.
+    Main logic: fetch eBay listings and upsert to database with stable timestamps.
     
     Returns:
         dict: Result with statistics.
     """
-    keywords = parse_csv_env("AMAZON_KEYWORDS")
-    marketplace = os.getenv("AMAZON_MARKETPLACE", "MX")
+    keywords = parse_csv_env("EBAY_KEYWORDS")
+    marketplace = os.getenv("EBAY_MARKETPLACE", "MX")
+    # Use FX_AS_OF_DATE for stable timestamp, or default to today (midnight UTC)
     fx_as_of_date = os.getenv("FX_AS_OF_DATE") or datetime.now(timezone.utc).date().isoformat()
     
     if not keywords:
-        logger.info("No AMAZON_KEYWORDS configured - skipping Amazon listings extraction")
+        logger.info("No EBAY_KEYWORDS configured - skipping eBay listings extraction")
         return {"success": True, "keywords_processed": 0, "items_fetched": 0, "items_inserted": 0}
     
     total_fetched = 0
@@ -132,7 +146,7 @@ def process_amazon_listings():
     
     for keyword in keywords:
         try:
-            items = fetch_amazon_listings(keyword, marketplace)
+            items = fetch_ebay_listings(keyword, marketplace)
             total_fetched += len(items)
             
             if items:
@@ -140,16 +154,16 @@ def process_amazon_listings():
                 sell_listings_payload = []
                 for item in items:
                     try:
-                        mapped = map_amazon_item_to_selllisting(item, marketplace, fx_as_of_date)
+                        mapped = map_ebay_item_to_selllisting(item, marketplace, fx_as_of_date)
                         sell_listings_payload.append(mapped)
                     except Exception as e:
-                        logger.error(f"Failed to map Amazon item: {e}")
+                        logger.error(f"Failed to map eBay item: {e}")
                 
                 if sell_listings_payload:
                     payload = {"sellListings": sell_listings_payload}
                     result = exec_sp_json("dbo.sp_sellListings", payload)
                     total_inserted += len(sell_listings_payload)
-                    logger.info(f"Inserted {len(sell_listings_payload)} Amazon listings for keyword='{keyword}'")
+                    logger.info(f"Inserted {len(sell_listings_payload)} eBay listings for keyword='{keyword}'")
             
         except Exception as e:
             logger.error(f"Failed to process keyword='{keyword}': {str(e)}")
@@ -163,35 +177,35 @@ def process_amazon_listings():
     }
 
 
-def run_amazon_listings_worker(mytimer: func.TimerRequest) -> None:
+def run_ebay_listings_worker(mytimer: func.TimerRequest) -> None:
     """
-    Azure Functions timer trigger entry point for Amazon listings worker.
+    Azure Functions timer trigger entry point for eBay listings worker.
     
     Args:
         mytimer: Azure Functions timer trigger context.
     """
-    logger.info("amazon_listings_worker started")
+    logger.info("ebay_listings_worker started")
     
     if mytimer.past_due:
         logger.warning('The timer is past due!')
     
     try:
-        result = process_amazon_listings()
+        result = process_ebay_listings()
         logger.info(
-            f"amazon_listings_worker completed: "
+            f"ebay_listings_worker completed: "
             f"keywords={result['keywords_processed']}, "
             f"fetched={result['items_fetched']}, "
             f"inserted={result['items_inserted']}"
         )
     except Exception as e:
-        logger.error(f"amazon_listings_worker failed: {str(e)}", exc_info=True)
+        logger.error(f"ebay_listings_worker failed: {str(e)}", exc_info=True)
         raise
 
 
 # Standalone function for direct execution (non-Azure)
 def main():
-    """Run Amazon listings worker outside of Azure Functions."""
-    result = process_amazon_listings()
-    print(f"Amazon listings worker completed: {result}")
+    """Run eBay listings worker outside of Azure Functions."""
+    result = process_ebay_listings()
+    print(f"eBay listings worker completed: {result}")
     return result
 

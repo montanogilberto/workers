@@ -10,7 +10,7 @@ az functionapp config appsettings set -g rg-smartloans-workers -n smartloans-wor
 az functionapp config appsettings list -g rg-smartloans-workers -n smartloans-workers-func -o table
 
 
-https://auth.mercadolibre.com.mx/authorization?response_type=code&client_id=4763056577640918&redirect_uri=http://localhost:8080/callback
+https://auth.mercadolibre.com.mx/authorization?response_type=code&client_id=4763056577640918&redirect_uri=https://smartloansbackend.azurewebsites.net/mercadolibre/oauth/callback
 
 https://auth.mercadolibre.com.mx/authorization
 ?response_type=code

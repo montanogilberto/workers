@@ -1,0 +1,114 @@
+<parameter name="content"># TODO: Fix 403 Error - Route ML API Calls Through Backend Proxy
+
+## Problem Analysis
+
+Workers are getting 403 errors from Mercado Libre because they're calling ML's API directly instead of routing through the backend proxy.
+
+### Investigation Results
+
+**1. `shared/ml_api.py` - Updated ✓**
+- Changed `ml_search()` to use `BACKEND_BASE` from `SMARTLOANS_BACKEND_URL` env var
+- Changed `ml_item()` to use backend proxy
+- Removed 403 token refresh logic (backend handles auth)
+
+**2. `mlSearchWorker/main.py` - PROBLEM FOUND ⚠️**
+- Has a placeholder `try_ml_public_search()` function (lines 110-128)
+- This function DOES NOT call `ml_api.py` - it just returns a hardcoded 403 response
+- This is why the 403 persists - the worker never calls the backend proxy!
+
+**3. `shared/ml_auth.py` - OK (no changes needed)**
+- Calls ML OAuth endpoint directly for token refresh
+- This is expected - token refresh must go to ML's OAuth endpoint
+
+### Root Cause
+
+The `mlSearchWorker` was implemented with a placeholder that returns 403 instead of calling the actual API. The worker needs to be updated to:
+1. Import and use `ml_search()` from `shared.ml_api`
+2. Call the backend proxy via `ml_api.ml_search()`
+
+## Solution
+
+### Update `mlSearchWorker/main.py`
+
+Replace the placeholder `try_ml_public_search()` function with actual implementation:
+
+```python
+from shared.ml_api import ml_search
+
+def try_ml_public_search(
+    payload: Dict[str, Any]
+) -> Tuple[bool, Optional[int], Optional[Dict[str, Any]], Optional[list]]:
+    """
+    Call ML search via backend proxy.
+    
+    Return:
+      (ok, http_status, error_json, results)
+    """
+    site_id = payload.get("site_id", "MLM")
+    query_text = payload.get("query_text", "")
+    category = payload.get("category")
+    seller_id = payload.get("seller_id")
+    offset = payload.get("offset", 0)
+    limit = payload.get("limit", 50)
+    
+    try:
+        results = ml_search(
+            q=query_text,
+            category=category,
+            seller_id=seller_id,
+            offset=offset,
+            limit=limit
+        )
+        return (True, 200, None, results)
+    except requests.exceptions.HTTPError as e:
+        error_json = None
+        if e.response is not None:
+            try:
+                error_json = e.response.json()
+            except Exception:
+                error_json = {"msg": e.response.text}
+        return (False, e.response.status_code, error_json, None)
+    except Exception as e:
+        return (False, 500, {"msg": str(e)}, None)
+```
+
+## Files to Edit
+
+1. `mlSearchWorker/main.py` - Update `try_ml_public_search()` to use `ml_search()` from `shared.ml_api`
+
+## Deployment Steps
+
+1. Update `mlSearchWorker/main.py` with the real implementation
+2. Deploy to Azure Function App
+3. Verify in Azure logs that calls go through backend proxy:
+   - Expected: `https://smartloansbackend.azurewebsites.net/ml/search?...`
+   - NOT expected: `https://api.mercadolibre.com/...`
+
+## Verification
+
+After fix, check Azure Function logs:
+```
+# Should see these calls (backend proxy):
+GET https://smartloansbackend.azurewebsites.net/ml/search?q=...
+
+# Should NOT see direct ML calls:
+GET https://api.mercadolibre.com/sites/MLM/search...
+```
+
+## Architecture Summary
+
+```
+Worker (Azure Functions)
+    ↓ calls
+ml_api.ml_search()
+    ↓ calls (via SMARTLOANS_BACKEND_URL)
+Backend Proxy (smartloansbackend.azurewebsites.net/ml/search)
+    ↓ forwards with ML auth headers
+MercadoLibre API (api.mercadolibre.com)
+```
+
+Workers → Backend Proxy → ML API
+
+Workers should NEVER call ML API directly.
+
+</parameter>

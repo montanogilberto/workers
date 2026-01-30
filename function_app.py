@@ -28,6 +28,7 @@ from publishJobsWorker import run_publish_jobs_worker
 from exchangeRatesWorker import run_exchange_rates_worker
 from mlSellListingsWorker import run_ml_sell_listings_worker
 from amazonListingsWorker import run_amazon_listings_worker
+from ebayListingsWorker import run_ebay_listings_worker
 
 # =============================================================================
 # Timer Trigger Functions
@@ -106,7 +107,6 @@ def amazon_listings_timer(mytimer: func.TimerRequest) -> None:
     run_on_startup=True,
     use_monitor=False
 )
-
 def exchange_rates_timer(mytimer: func.TimerRequest) -> None:
     """
     Timer trigger for exchange rates fetch.
@@ -118,6 +118,30 @@ def exchange_rates_timer(mytimer: func.TimerRequest) -> None:
     """
     logging.info("exchange_rates_timer fired")
     run_exchange_rates_worker(mytimer)
+
+
+@app.timer_trigger(
+    schedule="0 */20 * * * *",  # Every 20 minutes at :00, :20, :40
+    arg_name="mytimer",
+    run_on_startup=True,
+    use_monitor=False
+)
+def ebay_listings_timer(mytimer: func.TimerRequest) -> None:
+    """
+    Timer trigger for eBay listings extraction.
+    
+    Schedule: Every 20 minutes
+    Worker: Extracts eBay listings based on keywords and saves to DB.
+    
+    Environment Variables:
+        EBAY_KEYWORDS: Comma-separated keywords to search
+        EBAY_MARKETPLACE: Marketplace code (default: MX)
+        EBAY_API_BASE: eBay API base URL
+        EBAY_API_KEY: eBay API authentication key
+        EBAY_SANDBOX: Use eBay sandbox (1=true)
+    """
+    logging.info("ebay_listings_timer fired")
+    run_ebay_listings_worker(mytimer)
 
 @app.timer_trigger(
     schedule="*/30 * * * * *",  # Every 30 seconds

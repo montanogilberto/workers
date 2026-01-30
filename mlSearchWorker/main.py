@@ -9,12 +9,14 @@ ML Search Worker
 import os
 import json
 import logging
+import requests
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import azure.functions as func
 
 from shared.db import exec_sp_json
+from shared.ml_api import ml_search
 
 logger = logging.getLogger(__name__)
 
@@ -135,29 +137,49 @@ def create_search_run(
 
 
 # -----------------------------
-# ML API placeholder
+# ML API via Backend Proxy
 # -----------------------------
 def try_ml_public_search(
     payload: Dict[str, Any]
 ) -> Tuple[bool, Optional[int], Optional[Dict[str, Any]], Optional[list]]:
     """
-    Temporary placeholder.
-    MercadoLibre public search currently blocked (403 PolicyAgent).
-
+    Call ML search via backend proxy.
+    
+    Routes through smartloansbackend.azurewebsites.net/ml/search
+    The backend handles ML authentication and browser headers.
+    
     Return:
       (ok, http_status, error_json, results)
     """
-    return (
-        False,
-        403,
-        {
-            "type": "http",
-            "status": 403,
-            "code": "PolicyAgent",
-            "msg": "Forbidden"
-        },
-        None
-    )
+    query_text = payload.get("query_text", "")
+    category = payload.get("category")
+    seller_id = payload.get("seller_id")
+    offset = payload.get("offset", 0)
+    limit = payload.get("limit", 50)
+    
+    try:
+        results = ml_search(
+            q=query_text,
+            category=category,
+            seller_id=seller_id,
+            offset=offset,
+            limit=limit
+        )
+        logger.info(f"ML search returned {len(results.get('results', []))} results")
+        return (True, 200, None, results)
+    except requests.exceptions.HTTPError as e:
+        error_json = None
+        if e.response is not None:
+            try:
+                error_json = e.response.json()
+            except Exception:
+                error_json = {"msg": e.response.text, "status": e.response.status_code}
+        logger.error(f"ML search HTTP error: {e.response.status_code if e.response else 'unknown'}")
+        return (False, e.response.status_code if e.response else 500, error_json, None)
+    except Exception as e:
+        logger.exception(f"ML search exception: {e}")
+        error_json = {"type": "exception", "msg": str(e)}
+        return (False, 500, error_json, None)
 
 
 def backoff_not_before(attempts: int) -> str:
@@ -263,7 +285,7 @@ def run_ml_search_worker(mytimer: func.TimerRequest) -> None:
         return
 
     # -----------------------------
-    # Success path (future)
+    # Success path
     # -----------------------------
     create_search_run(
         site_id=site_id,
@@ -277,3 +299,4 @@ def run_ml_search_worker(mytimer: func.TimerRequest) -> None:
 
     update_job(job_id, status="done", unlock=1)
     logger.info("job_id=%s completed", job_id)
+
